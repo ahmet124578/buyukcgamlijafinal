@@ -164,7 +164,7 @@ export async function ensurePaymentReceiptBucket() {
 
   const { error: createError } = await supabaseAdmin.storage.createBucket("payment-receipts", {
     public: false,
-    fileSizeLimit: 5 * 1024 * 1024,
+    fileSizeLimit: 4 * 1024 * 1024,
     allowedMimeTypes: ["image/jpeg", "image/png", "application/pdf"],
   });
 

@@ -28,7 +28,7 @@ function maskValue(value: string, keepStart = 4, keepEnd = 4): string {
 }
 
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "application/pdf"];
-const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const MAX_FILE_SIZE = 4 * 1024 * 1024;
 
 export function BankTransferDisplay({ booking }: BankTransferDisplayProps) {
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -91,7 +91,7 @@ export function BankTransferDisplay({ booking }: BankTransferDisplayProps) {
     }
 
     if (file.size > MAX_FILE_SIZE) {
-      return "Receipt must be smaller than 5MB.";
+      return "Receipt must be smaller than 4MB.";
     }
 
     return null;

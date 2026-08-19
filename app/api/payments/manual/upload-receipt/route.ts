@@ -3,6 +3,8 @@ import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { ensurePaymentReceiptBucket, getPrivateReceiptUrl } from "@/lib/payments/manual";
 import { hasBookingAccess } from "@/lib/auth/booking-access";
 
+const MAX_RECEIPT_SIZE = 4 * 1024 * 1024;
+
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
@@ -25,8 +27,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "The uploaded file is empty" }, { status: 400 });
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      return NextResponse.json({ error: "Receipt must be smaller than 5MB" }, { status: 400 });
+    if (file.size > MAX_RECEIPT_SIZE) {
+      return NextResponse.json({ error: "Receipt must be smaller than 4MB" }, { status: 400 });
     }
 
     const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf"];
