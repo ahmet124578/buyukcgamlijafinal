@@ -4,6 +4,7 @@ import { isValidBookingTime } from "@/lib/booking/hours";
 import { calculateBookingPriceBreakdown, parseSelectedEquipmentQuantities } from "@/lib/booking/pricing";
 import { validateAreaCapacity, getAreaCapacity } from "@/lib/business-rules/areas";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
+import { setBookingAccessCookie } from "@/lib/auth/booking-access";
 
 const AREA_SLOT_CONFLICT_MESSAGE = "This area is already booked for this date and time. Please choose another area or time.";
 
@@ -181,7 +182,7 @@ export async function POST(request: Request) {
         .select("id")
         .eq("selected_area_id", areaId)
         .eq("booking_date", bookingDate)
-        .eq("booking_time", bookingTime)
+        .like("booking_time", `${bookingTime}%`)
         .in("booking_status", ["pending", "confirmed"])
         .or("payment_status.is.null,payment_status.not.in.(rejected,cancelled,failed,refunded,refund_failed)");
 
@@ -259,7 +260,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ bookingId: data?.id ?? null, reservationCode: data?.reservation_code ?? reservationCode, success: true }, { status: 201 });
+    const response = NextResponse.json({ bookingId: data?.id ?? null, reservationCode: data?.reservation_code ?? reservationCode, success: true }, { status: 201 });
+    if (data?.id) {
+      await setBookingAccessCookie(response, data.id);
+    }
+    return response;
   } catch (error) {
     return NextResponse.json(
       {

@@ -87,6 +87,126 @@ type PeriodSummary = {
   revenue: number;
 };
 
+const ADMIN_PAGE_SIZE = 25;
+const SUMMARY_PAGE_SIZE = 1000;
+const TERMINAL_PAYMENT_STATUSES = ["rejected", "cancelled", "failed", "refunded", "refund_failed"];
+
+type SummaryBooking = {
+  id: string;
+  booking_date: string | null;
+  booking_status: string | null;
+  payment_status: string | null;
+  adults: number | null;
+  children_3_plus: number | null;
+  children_under_3: number | null;
+  total_price: number | null;
+};
+
+type PaymentAggregate = {
+  paid: number;
+  refunded: number;
+  validPaid: number;
+  status: string | null;
+};
+
+type AdminCalendarBooking = {
+  id: string;
+  customer_name: string | null;
+  booking_date: string | null;
+  booking_time: string | null;
+  adults: number | null;
+  children_3_plus: number | null;
+  children_under_3: number | null;
+  total_price: number | null;
+  booking_status: string | null;
+  payment_status: string | null;
+};
+
+function isActiveBooking(booking: { booking_status?: string | null; payment_status?: string | null }) {
+  const bookingStatus = String(booking.booking_status ?? "").trim().toLowerCase();
+  const paymentStatus = String(booking.payment_status ?? "").trim().toLowerCase();
+  return ["pending", "confirmed"].includes(bookingStatus) && !TERMINAL_PAYMENT_STATUSES.includes(paymentStatus);
+}
+
+async function fetchAllSummaryBookings(supabaseAdmin: ReturnType<typeof getSupabaseAdminClient>) {
+  const rows: SummaryBooking[] = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("bookings")
+      .select("id, booking_date, booking_status, payment_status, adults, children_3_plus, children_under_3, total_price")
+      .order("booking_date", { ascending: true })
+      .range(offset, offset + SUMMARY_PAGE_SIZE - 1);
+
+    if (error) throw error;
+    rows.push(...((data ?? []) as SummaryBooking[]));
+    if (!data || data.length < SUMMARY_PAGE_SIZE) break;
+    offset += SUMMARY_PAGE_SIZE;
+  }
+
+  return rows;
+}
+
+async function fetchPaymentAggregates(supabaseAdmin: ReturnType<typeof getSupabaseAdminClient>, bookingIds: string[]) {
+  const lookup: Record<string, PaymentAggregate> = {};
+
+  for (let offset = 0; offset < bookingIds.length; offset += 500) {
+    const ids = bookingIds.slice(offset, offset + 500);
+    const { data, error } = await supabaseAdmin
+      .from("payments")
+      .select("booking_id, amount, refund_amount, status, created_at")
+      .in("booking_id", ids)
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+
+    for (const payment of data ?? []) {
+      const current = lookup[payment.booking_id] ?? { paid: 0, refunded: 0, validPaid: 0, status: null };
+      const status = String(payment.status ?? "").trim().toLowerCase();
+      if (["paid", "verified", "approved"].includes(status)) current.paid += Math.max(Number(payment.amount ?? 0), 0);
+      current.refunded += Math.max(Number(payment.refund_amount ?? 0), 0);
+      current.validPaid = Math.max(current.paid - current.refunded, 0);
+      current.status = payment.status ?? current.status;
+      lookup[payment.booking_id] = current;
+    }
+  }
+
+  return lookup;
+}
+
+async function fetchCalendarBookings(supabaseAdmin: ReturnType<typeof getSupabaseAdminClient>, start: string, end: string) {
+  const rows: AdminCalendarBooking[] = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("bookings")
+      .select("id, customer_name, booking_date, booking_time, adults, children_3_plus, children_under_3, total_price, booking_status, payment_status")
+      .gte("booking_date", start)
+      .lte("booking_date", end)
+      .order("booking_date", { ascending: true })
+      .order("booking_time", { ascending: true })
+      .range(offset, offset + SUMMARY_PAGE_SIZE - 1);
+
+    if (error) throw error;
+    rows.push(...((data ?? []) as AdminCalendarBooking[]));
+    if (!data || data.length < SUMMARY_PAGE_SIZE) break;
+    offset += SUMMARY_PAGE_SIZE;
+  }
+
+  return rows;
+}
+
+function getCalendarMonthRange(monthKey: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(monthKey);
+  const year = Number(match?.[1] ?? new Date().getUTCFullYear());
+  const month = Number(match?.[2] ?? new Date().getUTCMonth() + 1);
+  const start = `${year}-${String(month).padStart(2, "0")}-01`;
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return { start, end: `${year}-${String(month).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}` };
+}
+
 function summarizeBookings(
   bookings: Array<{
     booking_date?: string | null;
@@ -100,9 +220,8 @@ function summarizeBookings(
   endDate: string,
 ): PeriodSummary {
   const included = bookings.filter((booking) => {
-    const status = String(booking.booking_status ?? "").trim().toLowerCase();
     const date = String(booking.booking_date ?? "");
-    return !["cancelled", "canceled"].includes(status) && date >= startDate && date <= endDate;
+    return isActiveBooking(booking) && date >= startDate && date <= endDate;
   });
 
   return included.reduce<PeriodSummary>(
@@ -284,6 +403,9 @@ function buildAdminUrl({
   paymentStatus = "",
   paymentMethod = "",
   customerEmail = "",
+  areaId = "",
+  page = "",
+  calendarMonth = "",
 }: {
   bookingId?: string | null;
   filter?: string;
@@ -293,6 +415,9 @@ function buildAdminUrl({
   paymentStatus?: string;
   paymentMethod?: string;
   customerEmail?: string;
+  areaId?: string;
+  page?: string;
+  calendarMonth?: string;
 }) {
   const params = new URLSearchParams();
 
@@ -324,6 +449,10 @@ function buildAdminUrl({
     params.set("customerEmail", customerEmail);
   }
 
+  if (areaId) params.set("areaId", areaId);
+  if (page && page !== "1") params.set("page", page);
+  if (calendarMonth) params.set("calendarMonth", calendarMonth);
+
   if (bookingId) {
     params.set("bookingId", bookingId);
   }
@@ -344,6 +473,9 @@ export default async function AdminDashboardPage({
     paymentStatus?: string;
     paymentMethod?: string;
     customerEmail?: string;
+    areaId?: string;
+    page?: string;
+    calendarMonth?: string;
   }>;
 }) {
   try {
@@ -361,14 +493,34 @@ export default async function AdminDashboardPage({
   const selectedPaymentStatus = typeof params.paymentStatus === "string" ? params.paymentStatus : "";
   const selectedPaymentMethod = typeof params.paymentMethod === "string" ? params.paymentMethod : "";
   const selectedCustomerEmail = typeof params.customerEmail === "string" ? params.customerEmail.trim().toLowerCase() : "";
+  const selectedAreaId = typeof params.areaId === "string" ? params.areaId : "";
+  const currentPage = Math.max(Number.parseInt(typeof params.page === "string" ? params.page : "1", 10) || 1, 1);
+  const today = getSouthAfricaDate();
+  const calendarMonth = typeof params.calendarMonth === "string" ? params.calendarMonth : today.slice(0, 7);
 
   const supabaseAdmin = getSupabaseAdminClient();
-  const { data: bookings, error } = await supabaseAdmin
+  let bookingQuery = supabaseAdmin
     .from("bookings")
-    .select("id, reservation_code, customer_name, email, phone_number, booking_date, booking_time, selected_area_id, total_price, booking_status, payment_status, payment_method, selected_equipment_ids, notes, adults, children_3_plus, children_under_3, created_at")
+    .select("id, reservation_code, customer_name, email, phone_number, booking_date, booking_time, selected_area_id, total_price, booking_status, payment_status, payment_method, selected_equipment_ids, notes, adults, children_3_plus, children_under_3, created_at", { count: "exact" })
     .order("booking_date", { ascending: true })
-    .order("booking_time", { ascending: true })
-    .limit(200);
+    .order("booking_time", { ascending: true });
+
+  if (selectedDate) bookingQuery = bookingQuery.eq("booking_date", selectedDate);
+  if (selectedBookingStatus) bookingQuery = bookingQuery.eq("booking_status", selectedBookingStatus);
+  if (selectedPaymentStatus) bookingQuery = bookingQuery.eq("payment_status", selectedPaymentStatus);
+  if (selectedPaymentMethod) bookingQuery = bookingQuery.eq("payment_method", selectedPaymentMethod);
+  if (selectedAreaId) bookingQuery = bookingQuery.eq("selected_area_id", selectedAreaId);
+  if (selectedCustomerEmail) bookingQuery = bookingQuery.eq("email", selectedCustomerEmail);
+  if (activeFilter === "pending_payment") bookingQuery = bookingQuery.in("payment_status", ["pending", "pending_payment", "verification_pending"]);
+  if (activeFilter === "paid") bookingQuery = bookingQuery.in("payment_status", ["paid", "verified", "confirmed", "approved"]);
+  if (activeFilter === "ikhokha") bookingQuery = bookingQuery.ilike("payment_method", "%ikhokha%");
+  if (activeFilter === "bank_transfer") bookingQuery = bookingQuery.or("payment_method.ilike.%bank%,payment_method.eq.manual,payment_method.eq.bank_transfer");
+  if (searchQuery) {
+    const safeSearch = searchQuery.replace(/[(),]/g, "").replace(/[%*]/g, "");
+    if (safeSearch) bookingQuery = bookingQuery.or(`customer_name.ilike.*${safeSearch}*,email.ilike.*${safeSearch}*,reservation_code.ilike.*${safeSearch}*`);
+  }
+
+  const { data: bookings, error, count: bookingCount } = await bookingQuery.range((currentPage - 1) * ADMIN_PAGE_SIZE, currentPage * ADMIN_PAGE_SIZE - 1);
 
   if (error) {
     return (
@@ -383,9 +535,14 @@ export default async function AdminDashboardPage({
   }
 
   const items = bookings ?? [];
-  const areaIds = [...new Set(items.map((booking) => booking.selected_area_id).filter((value): value is string => typeof value === "string" && value.trim().length > 0))];
+  const totalPages = Math.max(Math.ceil((bookingCount ?? 0) / ADMIN_PAGE_SIZE), 1);
+  const selectedBookingOutsidePage = selectedBookingId && !items.some((booking) => booking.id === selectedBookingId)
+    ? (await supabaseAdmin.from("bookings").select("id, reservation_code, customer_name, email, phone_number, booking_date, booking_time, selected_area_id, total_price, booking_status, payment_status, payment_method, selected_equipment_ids, notes, adults, children_3_plus, children_under_3, created_at").eq("id", selectedBookingId).maybeSingle()).data
+    : null;
+  const lookupItems = selectedBookingOutsidePage ? [...items, selectedBookingOutsidePage] : items;
+  const areaIds = [...new Set(lookupItems.map((booking) => booking.selected_area_id).filter((value): value is string => typeof value === "string" && value.trim().length > 0))];
   const allProductIds = [...new Set(
-    items.flatMap((booking) => {
+    lookupItems.flatMap((booking) => {
       const ids: string[] = [];
       if (typeof booking.selected_area_id === "string" && booking.selected_area_id.trim()) ids.push(booking.selected_area_id);
       if (Array.isArray(booking.selected_equipment_ids)) ids.push(...booking.selected_equipment_ids.filter((value): value is string => typeof value === "string" && value.trim().length > 0));
@@ -408,22 +565,7 @@ export default async function AdminDashboardPage({
     Object.entries(productLookup).filter(([id]) => areaIds.includes(id))
   );
 
-  const paymentRows = items.length
-    ? (await supabaseAdmin
-        .from("payments")
-        .select("booking_id, amount, status, created_at")
-        .in("booking_id", items.map((booking) => booking.id))
-        .order("created_at", { ascending: false }))?.data ?? []
-    : [];
-  const paymentLookup: Record<string, { paid: number; status: string | null }> = {};
-  for (const payment of paymentRows) {
-    if (paymentLookup[payment.booking_id]) continue;
-    const status = String(payment.status ?? "").trim().toLowerCase();
-    paymentLookup[payment.booking_id] = {
-      paid: ["paid", "verified", "approved"].includes(status) ? Math.max(Number(payment.amount ?? 0), 0) : 0,
-      status: payment.status ?? null,
-    };
-  }
+  const paymentLookup = await fetchPaymentAggregates(supabaseAdmin, lookupItems.map((booking) => booking.id));
   const { data: rescheduleAreas } = await supabaseAdmin
     .from("products")
     .select("id, name")
@@ -489,38 +631,38 @@ export default async function AdminDashboardPage({
     return true;
   });
 
+  const summaryRows = await fetchAllSummaryBookings(supabaseAdmin);
   const summary = {
-    total: items.length,
-    pendingPayments: items.filter((booking) => {
+    total: summaryRows.length,
+    pendingPayments: summaryRows.filter((booking) => {
       const paymentStatus = String(booking.payment_status ?? "").trim().toLowerCase();
       return paymentStatus === "pending" || paymentStatus === "pending_payment" || paymentStatus === "verification_pending";
     }).length,
-    confirmed: items.filter((booking) => ["confirmed", "paid", "approved", "verified"].includes(String(booking.booking_status ?? "").trim().toLowerCase())).length,
-    cancelled: items.filter((booking) => ["cancelled", "canceled"].includes(String(booking.booking_status ?? "").trim().toLowerCase())).length,
-    refundPending: items.filter((booking) => String(booking.payment_status ?? "").trim().toLowerCase() === "refund_pending").length,
+    confirmed: summaryRows.filter((booking) => ["confirmed", "paid", "approved", "verified"].includes(String(booking.booking_status ?? "").trim().toLowerCase())).length,
+    cancelled: summaryRows.filter((booking) => ["cancelled", "canceled"].includes(String(booking.booking_status ?? "").trim().toLowerCase())).length,
+    refundPending: summaryRows.filter((booking) => String(booking.payment_status ?? "").trim().toLowerCase() === "refund_pending").length,
   };
 
-  const today = getSouthAfricaDate();
   const weekStart = getWeekStart(today);
-  const todaySummary = summarizeBookings(items, today, today);
-  const weekSummary = summarizeBookings(items, weekStart, today);
-  const calendarBookings = items.map((booking) => ({
-    id: booking.id,
-    customer_name: booking.customer_name,
-    booking_date: booking.booking_date,
-    booking_time: booking.booking_time,
-    adults: booking.adults,
-    children_3_plus: booking.children_3_plus,
-    children_under_3: booking.children_under_3,
-    total_price: booking.total_price,
-    booking_status: booking.booking_status,
-    payment_status: booking.payment_status,
-  }));
+  const todaySummary = summarizeBookings(summaryRows, today, today);
+  const weekSummary = summarizeBookings(summaryRows, weekStart, today);
+  const calendarRange = getCalendarMonthRange(calendarMonth);
+  const calendarBookings = await fetchCalendarBookings(supabaseAdmin, calendarRange.start, calendarRange.end);
 
-  const selectedBooking = items.find((booking) => booking.id === selectedBookingId) ?? null;
-  const customerBookings = selectedCustomerEmail
-    ? items.filter((booking) => String(booking.email ?? "").trim().toLowerCase() === selectedCustomerEmail)
+  const selectedBooking = items.find((booking) => booking.id === selectedBookingId) ?? selectedBookingOutsidePage ?? null;
+  const customerHistoryBookings = selectedCustomerEmail
+    ? (await supabaseAdmin
+        .from("bookings")
+        .select("id, reservation_code, customer_name, email, phone_number, booking_date, booking_time, selected_area_id, total_price, booking_status, payment_status, payment_method, adults, children_3_plus, children_under_3")
+        .eq("email", selectedCustomerEmail)
+        .order("booking_date", { ascending: false }))?.data ?? []
     : [];
+  const customerHistoryPaymentLookup = await fetchPaymentAggregates(supabaseAdmin, customerHistoryBookings.map((booking) => booking.id));
+  const customerHistoryAreaIds = [...new Set(customerHistoryBookings.map((booking) => booking.selected_area_id).filter((value): value is string => Boolean(value)))];
+  const customerHistoryAreaLookup: Record<string, string> = customerHistoryAreaIds.length
+    ? Object.fromEntries(((await supabaseAdmin.from("products").select("id, name").in("id", customerHistoryAreaIds)).data ?? []).map((area) => [area.id, area.name]))
+    : {};
+  const customerBookings = customerHistoryBookings;
   
   // Calculate discount information for selected booking
   const selectedBookingDiscount = selectedBooking && selectedBooking.created_at && selectedBooking.booking_date
@@ -560,7 +702,7 @@ export default async function AdminDashboardPage({
       )?.data ?? null
     : null;
   const refundAmountDue = Number(selectedPayment?.refund_amount ?? selectedPayment?.amount ?? selectedBookingWithDiscount?.total_price ?? 0);
-  const paidAmount = Number(selectedPayment?.amount ?? 0);
+  const paidAmount = selectedBookingWithDiscount ? (paymentLookup[selectedBookingWithDiscount.id]?.validPaid ?? 0) : 0;
   const outstandingBalance = selectedBookingWithDiscount
     ? Math.max(Number(selectedBookingWithDiscount.total_price ?? 0) - paidAmount, 0)
     : null;
@@ -674,7 +816,7 @@ export default async function AdminDashboardPage({
             })}
           </div>
 
-          <form method="GET" action="/admin" className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
+          <form method="GET" action="/admin" className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-7">
             <input type="hidden" name="filter" value={activeFilter} />
             {selectedBookingId && <input type="hidden" name="bookingId" value={selectedBookingId} />}
 
@@ -697,6 +839,14 @@ export default async function AdminDashboardPage({
                 defaultValue={selectedDate}
                 className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-emerald-500 focus:bg-white"
               />
+            </label>
+
+            <label>
+              <span className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Area</span>
+              <select name="areaId" defaultValue={selectedAreaId} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-emerald-500 focus:bg-white">
+                <option value="">All areas</option>
+                {(rescheduleAreas ?? []).map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}
+              </select>
             </label>
 
             <label>
@@ -817,8 +967,8 @@ export default async function AdminDashboardPage({
                       <td className="px-4 py-4 text-slate-700">{visitorCounts.total}</td>
                       <td className="px-4 py-4 text-slate-700">{areaName}</td>
                       <td className="px-4 py-4 font-semibold text-slate-900">{formatMoney(booking.total_price)}</td>
-                      <td className="px-4 py-4 font-semibold text-slate-900">{formatMoney(paymentLookup[booking.id]?.paid ?? 0)}</td>
-                      <td className="px-4 py-4 font-semibold text-slate-900">{formatMoney(Math.max(Number(booking.total_price ?? 0) - (paymentLookup[booking.id]?.paid ?? 0), 0))}</td>
+                      <td className="px-4 py-4 font-semibold text-slate-900">{formatMoney(paymentLookup[booking.id]?.validPaid ?? 0)}</td>
+                      <td className="px-4 py-4 font-semibold text-slate-900">{formatMoney(Math.max(Number(booking.total_price ?? 0) - (paymentLookup[booking.id]?.validPaid ?? 0), 0))}</td>
                       <td className="px-4 py-4">
                         <div className="font-medium text-slate-900">{formatPaymentMethod(booking.payment_method)}</div>
                       </td>
@@ -887,8 +1037,8 @@ export default async function AdminDashboardPage({
                   <div><div className="text-xs text-slate-500">Children</div><div className="mt-1 font-semibold text-slate-900">{visitorCounts.children}</div></div>
                   <div><div className="text-xs text-slate-500">Total people</div><div className="mt-1 font-semibold text-slate-900">{visitorCounts.total}</div></div>
                   <div><div className="text-xs text-slate-500">Total</div><div className="mt-1 font-semibold text-slate-900">{formatMoney(booking.total_price)}</div></div>
-                  <div><div className="text-xs text-slate-500">Paid</div><div className="mt-1 font-semibold text-slate-900">{formatMoney(paymentLookup[booking.id]?.paid ?? 0)}</div></div>
-                  <div><div className="text-xs text-slate-500">Outstanding</div><div className="mt-1 font-semibold text-slate-900">{formatMoney(Math.max(Number(booking.total_price ?? 0) - (paymentLookup[booking.id]?.paid ?? 0), 0))}</div></div>
+                  <div><div className="text-xs text-slate-500">Paid</div><div className="mt-1 font-semibold text-slate-900">{formatMoney(paymentLookup[booking.id]?.validPaid ?? 0)}</div></div>
+                  <div><div className="text-xs text-slate-500">Outstanding</div><div className="mt-1 font-semibold text-slate-900">{formatMoney(Math.max(Number(booking.total_price ?? 0) - (paymentLookup[booking.id]?.validPaid ?? 0), 0))}</div></div>
                 </div>
                 <div className="mt-4 flex min-w-0 flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
                   <span className={`max-w-full truncate rounded-full border px-2.5 py-1 text-[11px] font-semibold ${getPaymentStatusClasses(booking.payment_status)}`}>{formatPaymentStatus(booking.payment_status)}</span>
@@ -905,6 +1055,16 @@ export default async function AdminDashboardPage({
             );
           })}
         </div>
+
+        {totalPages > 1 && (
+          <nav className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm" aria-label="Reservation pages">
+            <span className="text-slate-500">Page {currentPage} of {totalPages} · {bookingCount ?? 0} reservations</span>
+            <div className="flex min-w-0 gap-2">
+              {currentPage > 1 && <a href={buildAdminUrl({ filter: activeFilter, search: searchQuery, date: selectedDate, bookingStatus: selectedBookingStatus, paymentStatus: selectedPaymentStatus, paymentMethod: selectedPaymentMethod, areaId: selectedAreaId, page: String(currentPage - 1), calendarMonth })} className="rounded-xl border border-slate-200 px-3 py-2 font-semibold text-slate-700 hover:bg-slate-50">Previous</a>}
+              {currentPage < totalPages && <a href={buildAdminUrl({ filter: activeFilter, search: searchQuery, date: selectedDate, bookingStatus: selectedBookingStatus, paymentStatus: selectedPaymentStatus, paymentMethod: selectedPaymentMethod, areaId: selectedAreaId, page: String(currentPage + 1), calendarMonth })} className="rounded-xl border border-slate-200 px-3 py-2 font-semibold text-slate-700 hover:bg-slate-50">Next</a>}
+            </div>
+          </nav>
+        )}
       </div>
 
       {selectedCustomerEmail && (
@@ -923,7 +1083,12 @@ export default async function AdminDashboardPage({
             <div className="col-span-2 rounded-2xl border border-emerald-100 bg-white p-4 sm:col-span-1"><div className="text-xs text-slate-500">Previous bookings</div><div className="mt-1 text-2xl font-black text-slate-900">{Math.max(customerBookings.length - 1, 0)}</div></div>
           </div>
           <div className="mt-4 divide-y divide-slate-200 rounded-2xl border border-slate-200 bg-white">
-            {customerBookings.map((booking) => <div key={booking.id} className="flex min-w-0 flex-wrap items-center gap-3 px-4 py-3 text-sm"><span className="shrink-0 font-semibold text-slate-500">{formatDisplayDate(booking.booking_date)}</span><span className="min-w-0 flex-1 truncate font-semibold text-slate-900">{formatShortReference(booking.reservation_code || booking.id)}</span><span className="shrink-0 font-semibold text-slate-700">{formatMoney(booking.total_price)}</span><span className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold ${getBookingStatusClasses(booking.booking_status)}`}>{formatBookingStatus(booking.booking_status)}</span></div>)}
+            {customerBookings.map((booking) => {
+              const payment = customerHistoryPaymentLookup[booking.id];
+              const outstanding = Math.max(Number(booking.total_price ?? 0) - (payment?.validPaid ?? 0), 0);
+              const visitors = getVisitorCounts(booking);
+              return <div key={booking.id} className="flex min-w-0 flex-wrap items-center gap-3 px-4 py-3 text-sm"><span className="shrink-0 font-semibold text-slate-500">{formatDisplayDate(booking.booking_date)} · {formatDisplayTime(booking.booking_time)}</span><span className="min-w-0 flex-1 truncate font-semibold text-slate-900" title={customerHistoryAreaLookup[booking.selected_area_id ?? ""] || "Any"}>{formatShortReference(booking.reservation_code || booking.id)} · {customerHistoryAreaLookup[booking.selected_area_id ?? ""] || "Any"} · {visitors.total} guests</span><span className="shrink-0 font-semibold text-slate-700">{formatMoney(booking.total_price)} / {formatMoney(payment?.validPaid ?? 0)} / {formatMoney(outstanding)}</span><span className={`shrink-0 rounded-full border px-2 py-1 text-[10px] font-semibold ${getBookingStatusClasses(booking.booking_status)}`}>{formatBookingStatus(booking.booking_status)}</span></div>;
+            })}
           </div>
         </section>
       )}

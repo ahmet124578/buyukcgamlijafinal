@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
 import { ensurePaymentReceiptBucket, getPrivateReceiptUrl } from "@/lib/payments/manual";
+import { hasBookingAccess } from "@/lib/auth/booking-access";
 
 export async function POST(request: Request) {
   try {
@@ -10,6 +11,10 @@ export async function POST(request: Request) {
 
     if (!bookingId) {
       return NextResponse.json({ error: "Booking ID is required" }, { status: 400 });
+    }
+
+    if (!(await hasBookingAccess(bookingId))) {
+      return NextResponse.json({ error: "Booking access could not be verified." }, { status: 403 });
     }
 
     if (!(file instanceof File)) {

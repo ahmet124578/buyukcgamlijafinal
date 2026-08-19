@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 type CalendarBooking = {
   id: string;
@@ -55,8 +56,10 @@ function getVisitorCounts(booking: CalendarBooking) {
   return { adults, children, total: adults + children };
 }
 
-function isCancelled(booking: CalendarBooking) {
-  return ["cancelled", "canceled"].includes(String(booking.booking_status ?? "").trim().toLowerCase());
+function isActiveBooking(booking: CalendarBooking) {
+  const bookingStatus = String(booking.booking_status ?? "").trim().toLowerCase();
+  const paymentStatus = String(booking.payment_status ?? "").trim().toLowerCase();
+  return ["pending", "confirmed"].includes(bookingStatus) && !["rejected", "cancelled", "failed", "refunded", "refund_failed"].includes(paymentStatus);
 }
 
 function formatMoney(value: number) {
@@ -80,9 +83,12 @@ function getStatusClass(value: string | null) {
 }
 
 export function ReservationCalendar({ bookings, initialMonth }: { bookings: CalendarBooking[]; initialMonth: string }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const today = getTodayInSouthAfrica();
-  const [monthKey, setMonthKey] = useState(initialMonth);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const monthKey = initialMonth;
   const monthDate = fromMonthKey(monthKey);
 
   const summaries = useMemo(() => {
@@ -101,7 +107,7 @@ export function ReservationCalendar({ bookings, initialMonth }: { bookings: Cale
       };
       const visitors = getVisitorCounts(booking);
       current.reservations.push(booking);
-      if (!isCancelled(booking)) {
+      if (isActiveBooking(booking)) {
         current.activeReservations.push(booking);
         current.adults += visitors.adults;
         current.children += visitors.children;
@@ -131,7 +137,10 @@ export function ReservationCalendar({ bookings, initialMonth }: { bookings: Cale
 
   const moveMonth = (offset: number) => {
     const next = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + offset, 1));
-    setMonthKey(toMonthKey(next));
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.set("calendarMonth", toMonthKey(next));
+    nextParams.delete("bookingId");
+    router.push(`${pathname}?${nextParams.toString()}`);
     setSelectedDate(null);
   };
 
@@ -143,7 +152,7 @@ export function ReservationCalendar({ bookings, initialMonth }: { bookings: Cale
           <h2 id="reservation-calendar-title" className="mt-2 text-2xl font-black tracking-tight text-slate-900">Reservation Calendar</h2>
           <p className="mt-1 text-sm text-slate-500">View reservations and visitor counts by day.</p>
         </div>
-        <button type="button" onClick={() => { setMonthKey(initialMonth); setSelectedDate(today); }} className="shrink-0 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">Today</button>
+        <button type="button" onClick={() => { const nextParams = new URLSearchParams(searchParams.toString()); nextParams.set("calendarMonth", today.slice(0, 7)); nextParams.delete("bookingId"); router.push(`${pathname}?${nextParams.toString()}`); setSelectedDate(today); }} className="shrink-0 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">Today</button>
       </div>
 
       <div className="mt-5 flex items-center justify-between gap-3">

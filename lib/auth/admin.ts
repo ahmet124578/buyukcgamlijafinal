@@ -70,6 +70,14 @@ export async function requireAdminAccess() {
     throw new Error("Admin session required.");
   }
 
+  const supabase = getSupabasePublicClient();
+  const { data, error } = await supabase.auth.getUser(session.accessToken);
+  const verifiedEmail = data.user?.email?.trim().toLowerCase();
+
+  if (error || !verifiedEmail || verifiedEmail !== session.email.trim().toLowerCase()) {
+    throw new Error("Admin session is invalid or expired.");
+  }
+
   const allowedEmails = (process.env.ADMIN_EMAILS ?? "")
     .split(",")
     .map((email) => email.trim().toLowerCase())

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdminClient } from "@/lib/supabase/server";
+import { hasBookingAccess } from "@/lib/auth/booking-access";
 
 export async function GET(request: Request, { params }: { params: Promise<{ bookingId: string }> }) {
   try {
@@ -7,6 +8,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ book
 
     if (!bookingId) {
       return NextResponse.json({ error: "Booking ID is required" }, { status: 400 });
+    }
+
+    if (!(await hasBookingAccess(bookingId))) {
+      return NextResponse.json({ error: "Booking access could not be verified." }, { status: 403 });
     }
 
     const supabaseAdmin = getSupabaseAdminClient();
