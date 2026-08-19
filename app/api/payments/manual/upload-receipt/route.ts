@@ -68,27 +68,40 @@ export async function POST(request: Request) {
 
     const receiptUrl = await getPrivateReceiptUrl(storagePath, 60 * 60);
 
-    const { error: paymentError } = await supabaseAdmin
+    const paymentFields = {
+      amount: 0,
+      currency: "ZAR",
+      status: "pending",
+      refund_amount: 0,
+      receipt_url: receiptUrl,
+      receipt_file_name: file.name,
+      review_status: "pending",
+      reviewed_at: null,
+      review_note: null,
+      updated_at: new Date().toISOString(),
+    };
+    const { data: existingPayment, error: paymentLookupError } = await supabaseAdmin
       .from("payments")
-      .upsert(
-        [{
+      .select("id")
+      .eq("booking_id", bookingId)
+      .eq("provider", "manual")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (paymentLookupError) {
+      return NextResponse.json({ error: paymentLookupError.message }, { status: 500 });
+    }
+
+    const { error: paymentError } = existingPayment
+      ? await supabaseAdmin.from("payments").update(paymentFields).eq("id", existingPayment.id)
+      : await supabaseAdmin.from("payments").insert({
           booking_id: bookingId,
           provider: "manual",
           provider_payment_id: null,
           provider_reference: null,
-          amount: 0,
-          currency: "ZAR",
-          status: "pending",
-          refund_amount: 0,
-          receipt_url: receiptUrl,
-          receipt_file_name: file.name,
-          review_status: "pending",
-          reviewed_at: null,
-          review_note: null,
-          updated_at: new Date().toISOString(),
-        }],
-        { onConflict: "booking_id" },
-      );
+          ...paymentFields,
+        });
 
     if (paymentError) {
       return NextResponse.json({ error: paymentError.message }, { status: 500 });
