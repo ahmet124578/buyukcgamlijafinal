@@ -182,7 +182,7 @@ export async function POST(request: Request) {
         .select("id")
         .eq("selected_area_id", areaId)
         .eq("booking_date", bookingDate)
-        .like("booking_time", `${bookingTime}%`)
+        .eq("booking_time", bookingTime)
         .in("booking_status", ["pending", "confirmed"])
         .or("payment_status.is.null,payment_status.not.in.(rejected,cancelled,failed,refunded,refund_failed)");
 
